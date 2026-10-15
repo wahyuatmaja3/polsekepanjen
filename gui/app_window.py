@@ -49,7 +49,7 @@ class AppWindow(ctk.CTk):
 
     def _build_ui(self) -> None:
         self.username_var = tk.StringVar(value="")
-        self.status_var = tk.StringVar(value="Masukkan username Instagram lalu klik 'Mulai Scraping' (100% Tanpa Login & Tanpa Cookie).")
+        self.status_var = tk.StringVar(value="Masukkan username Instagram lalu klik 'Mulai Scraping' (Tanpa login Spotify / YouTube Music).")
         self.profile_var = tk.StringVar(value="")
         self.yt_playlist_url_var = tk.StringVar(value="")
         self.spotify_playlist_url_var = tk.StringVar(value="")
@@ -67,7 +67,7 @@ class AppWindow(ctk.CTk):
 
         sub_lbl = ctk.CTkLabel(
             top_card,
-            text="Ekstrak musik akun Instagram → Buat playlist Spotify & YouTube Music (100% Tanpa Login Akun & Tanpa Cookie!)",
+            text="Ekstrak musik akun Instagram → Buat playlist Spotify & YouTube Music (100% Tanpa Login Spotify & YouTube Music!)",
             font=ctk.CTkFont(size=12),
             text_color="#10b981",
         )
@@ -531,10 +531,115 @@ class AppWindow(ctk.CTk):
             height=28,
         ).pack(anchor="w", padx=12, pady=(0, 10))
 
+    def _show_cookie_required_dialog(self, username: str, reason: str = "") -> None:
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Session Instagram Diperlukan")
+        dialog.geometry("540x370")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog,
+            text="⚠️ Instagram Memerlukan Cookie Session",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color="#f59e0b",
+        ).pack(anchor="w", padx=20, pady=(18, 6))
+
+        desc = (
+            f"Instagram membatasi akses tanpa login (403 Forbidden pada graphql/query).\n\n"
+            f"Untuk memeriksa postingan asli dari akun @{username} dan mengekstrak lagu-lagu terbarunya, "
+            f"diperlukan file 'cookies.txt'.\n\n"
+            f"Cara mendapatkan:\n"
+            f"1. Pasang ekstensi 'Get cookies.txt LOCALLY' di browser Chrome/Edge.\n"
+            f"2. Buka instagram.com (pastikan sudah login di browser).\n"
+            f"3. Klik ikon ekstensi lalu klik Export cookies.txt."
+        )
+        ctk.CTkLabel(
+            dialog,
+            text=desc,
+            font=ctk.CTkFont(size=12),
+            text_color="gray85",
+            justify="left",
+            wraplength=490,
+        ).pack(anchor="w", padx=20, pady=(0, 16))
+
+        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20, pady=(0, 10))
+
+        def on_choose_file() -> None:
+            file_path = filedialog.askopenfilename(
+                parent=dialog,
+                title="Pilih File cookies.txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+                initialfile="cookies.txt",
+            )
+            if not file_path:
+                return
+            ok, msg = self.scraper.load_cookies_from_file(file_path)
+            if ok:
+                dialog.destroy()
+                self.status_var.set(f"Cookie berhasil dimuat! Memulai scraping @{username}...")
+                self.on_scrape()
+            else:
+                messagebox.showerror("Gagal", msg, parent=dialog)
+
+        def on_use_demo() -> None:
+            dialog.destroy()
+            self.on_load_demo()
+
+        def on_use_manual() -> None:
+            dialog.destroy()
+            self.on_open_manual_input()
+
+        ctk.CTkButton(
+            btn_row,
+            text="📂 Pilih cookies.txt & Lanjut",
+            command=on_choose_file,
+            fg_color="#10b981",
+            hover_color="#059669",
+            height=34,
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            btn_row,
+            text="⚡ Mode Demo",
+            command=on_use_demo,
+            fg_color="#4f46e5",
+            hover_color="#4338ca",
+            height=34,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            btn_row,
+            text="📝 Input Manual",
+            command=on_use_manual,
+            fg_color="gray30",
+            hover_color="gray40",
+            height=34,
+        ).pack(side="left")
+
+        cancel_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        cancel_row.pack(fill="x", padx=20, pady=(6, 0))
+        ctk.CTkButton(
+            cancel_row,
+            text="Tutup",
+            command=dialog.destroy,
+            fg_color="transparent",
+            text_color="gray60",
+            hover_color="gray25",
+            width=70,
+            height=28,
+        ).pack(side="right")
+
     def on_scrape(self) -> None:
         username = self._clean_username()
         if not username:
             self.status_var.set("Silakan masukkan username Instagram terlebih dahulu.")
+            return
+
+        if not self.scraper.session_id:
+            self._show_cookie_required_dialog(username)
             return
 
         max_songs = self._get_max_songs()
@@ -775,18 +880,7 @@ class AppWindow(ctk.CTk):
                     self._set_busy(False)
                     self.progress.set(0)
                     self.status_var.set("Akses Instagram dibatasi (403 Forbidden).")
-                    switch = messagebox.askyesno(
-                        "Instagram Membatasi Akses Anonim (403)",
-                        f"Instagram saat ini memblokir scraping anonim pada endpoint graphql/query (403 Forbidden).\n\n"
-                        f"Apakah Anda ingin memuat data musik contoh (Demo Mode) untuk @{username} agar langsung bisa membuat playlist Spotify & YouTube Music?\n\n"
-                        "(Atau klik 'No' untuk menggunakan tombol '📝 Input Manual' / '🔑 Cookie IG')",
-                    )
-                    if switch:
-                        self.on_load_demo()
-                    else:
-                        self.status_var.set(
-                            "Tips: Gunakan tombol '📝 Input Manual' untuk menempel lagu atau '🔑 Cookie IG' untuk live scraping."
-                        )
+                    self._show_cookie_required_dialog(username, reason)
 
                 elif kind == "yt_done":
                     _, url = event

@@ -49,7 +49,7 @@ class ProfilePreview:
 ProgressCallback = Callable[[int, int, str], None]
 
 
-# Curated lists ordered strictly from NEWEST release/post to older
+# Curated demo data strictly ordered from NEWEST release/post to older
 DEMO_PROFILES: dict[str, list[tuple[str, str, int, str]]] = {
     "taylorswift": [
         ("Fortnight", "Taylor Swift feat. Post Malone", 14, "Terbaru - 2024"),
@@ -145,7 +145,7 @@ class InstagramScraper:
         for candidate in ["cookies.txt", "instagram_cookies.txt", "ig_cookies.txt"]:
             p = Path(candidate)
             if p.is_file():
-                self.load_cookies_from_file(p)
+                self.load_cookies_from_file(str(p))
                 break
 
     def set_session_id(self, session_id: str) -> None:
@@ -193,23 +193,35 @@ class InstagramScraper:
     def _map_profile_error(self, exc: Exception, username: str) -> ScraperError:
         message = str(exc).lower()
         if "429" in message or "too many requests" in message or "rate" in message:
-            return RateLimitError("Instagram membatasi request (429 Rate Limit).")
-        if "403" in message or "forbidden" in message or "graphql/query" in message:
-            return AccessBlockedError("Akses Instagram dibatasi (403 Forbidden).")
+            return RateLimitError("Instagram membatasi request sementara (429 Rate Limit).")
+        if "403" in message or "forbidden" in message or "graphql/query" in message or "login" in message or "checkpoint" in message:
+            return AccessBlockedError(
+                f"Instagram memblokir akses ke postingan @{username} (403 Forbidden).\n\n"
+                "Meta/Instagram mewajibkan session login untuk membaca postingan akun ini.\n"
+                "Silakan muat file 'cookies.txt' (dari ekstensi Get cookies.txt LOCALLY) lewat tombol 'Cookie IG'."
+            )
         if "not found" in message or "404" in message or "not exist" in message:
-            return AccountNotFoundError(f"Akun @{username} tidak ditemukan.")
-        return ScraperError(f"Gagal mengakses @{username}: {exc}")
+            return AccountNotFoundError(f"Akun @{username} tidak ditemukan di Instagram.")
+        return ScraperError(f"Gagal mengakses akun Instagram @{username}: {exc}")
+
+    def _is_generic_audio(self, title: str, artist: str) -> bool:
+        """Check if audio is an uncredited original audio rather than a commercial song."""
+        t_low = title.lower()
+        a_low = artist.lower()
+        generic_markers = ["original audio", "audio asli", "suara asli", "original sound"]
+        return any(m in t_low or m in a_low for m in generic_markers)
 
     def extract_music_from_post(self, post: instaloader.Post) -> tuple[str, str] | None:
         """Extract song title and artist from an Instagram Post or Reel."""
         node = getattr(post, "_node", {}) or {}
 
-        # 1. Check clips_music_attribution_info (Reels)
+        # 1. Check clips_music_attribution_info (Instagram Reels)
         clips_info = node.get("clips_music_attribution_info") or {}
         if clips_info:
             song_name = (clips_info.get("song_name") or "").strip()
             artist_name = (clips_info.get("artist_name") or "").strip()
-            if song_name and artist_name:
+            uses_orig = clips_info.get("uses_original_audio", False)
+            if song_name and artist_name and not uses_orig and not self._is_generic_audio(song_name, artist_name):
                 return song_name, artist_name
 
         # 2. Check music_metadata
@@ -218,14 +230,14 @@ class InstagramScraper:
             asset = music_meta.get("music_info", {}).get("music_asset_info", {})
             title = (asset.get("title") or "").strip()
             artist = (asset.get("display_artist") or "").strip()
-            if title and artist:
+            if title and artist and not self._is_generic_audio(title, artist):
                 return title, artist
 
-        # 3. Check caption for music indicator patterns
+        # 3. Check caption for music tags
         caption = getattr(post, "caption", "") or ""
         if caption:
             patterns = [
-                r"(?:🎵|🎶|Music:|Song:)\s*([^-—\n]+)\s*[-—]\s*([^\n]+)",
+                r"(?:🎵|🎶|Music:|Song:|Lagu:)\s*([^-—\n]+)\s*[-—]\s*([^\n]+)",
                 r"(?:🎵|🎶)\s*([^\n]+)",
             ]
             for pat in patterns:
@@ -245,20 +257,10 @@ class InstagramScraper:
         if not clean:
             raise AccountNotFoundError("Username tidak valid.")
 
-        if not self.session_id:
-            display_name = clean.replace("_", " ").replace(".", " ").title()
-            return ProfilePreview(
-                username=clean,
-                full_name=display_name,
-                profile_pic_url="https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=150&h=150&fit=crop",
-                posts_count=20,
-                is_demo=False,
-            )
-
         try:
             profile = Profile.from_username(self.loader.context, clean)
             if profile.is_private:
-                raise PrivateAccountError("Akun private tidak bisa diakses.")
+                raise PrivateAccountError(f"Akun @{clean} bersifat Private dan tidak bisa diakses.")
             return ProfilePreview(
                 username=profile.username,
                 full_name=profile.full_name or profile.username,
@@ -266,191 +268,35 @@ class InstagramScraper:
                 posts_count=profile.mediacount,
                 is_demo=False,
             )
-        except Exception:
-            display_name = clean.replace("_", " ").replace(".", " ").title()
-            return ProfilePreview(
-                username=clean,
-                full_name=display_name,
-                profile_pic_url="https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=150&h=150&fit=crop",
-                posts_count=20,
-                is_demo=False,
+        except Exception as exc:
+            raise self._map_profile_error(exc, clean) from exc
+
+    def get_demo_result(self, username: str, max_songs: int = 10) -> ScrapingResult:
+        """Return curated sample data for instant MVP demonstration without hitting Instagram."""
+        clean = self._clean_username(username) or "creator"
+        items = DEMO_PROFILES.get(clean.lower(), DEMO_PROFILES["default"])
+
+        selected_items = items[:max_songs]
+        songs = [
+            Song(
+                title=item[0],
+                artist=item[1],
+                occurrence_count=item[2],
+                post_order_idx=idx,
+                release_tag=item[3] if len(item) > 3 else f"Post Terbaru #{idx}",
             )
-
-    def resolve_music_without_login(
-        self,
-        username: str,
-        max_songs: int = 10,
-        progress_callback: ProgressCallback | None = None,
-    ) -> ScrapingResult:
-        """Resolve music for any Instagram account ordered chronologically from the NEWEST songs first."""
-        clean = self._clean_username(username)
-        display_query = clean.replace("_", " ").replace(".", " ").strip()
-
-        if progress_callback:
-            progress_callback(1, max_songs, f"Mencari lagu-lagu terbaru untuk @{clean}...")
-
-        songs: list[Song] = []
-        seen: set[str] = set()
-
-        # Step 1: Check curated creator dictionary (ordered strictly newest first)
-        lower_clean = clean.lower()
-        if lower_clean in DEMO_PROFILES:
-            for item in DEMO_PROFILES[lower_clean]:
-                title, artist = item[0], item[1]
-                count = item[2]
-                tag = item[3] if len(item) > 3 else "Terbaru"
-                key = title.lower()
-                if key not in seen:
-                    seen.add(key)
-                    order = len(songs) + 1
-                    songs.append(
-                        Song(
-                            title=title,
-                            artist=artist,
-                            occurrence_count=count,
-                            post_order_idx=order,
-                            release_tag=tag,
-                        )
-                    )
-                if len(songs) >= max_songs:
-                    break
-
-        # Step 2: Query YouTube Music open catalog with Newest First strategy
-        if len(songs) < max_songs:
-            try:
-                from ytmusicapi import YTMusic
-
-                yt = YTMusic()
-                # 2A. Check artist channel for chronological newest singles/albums first
-                artists = yt.search(display_query, filter="artists")
-                if artists:
-                    aid = artists[0].get("browseId")
-                    if aid:
-                        artist_data = yt.get_artist(aid)
-                        # Read newest singles first (ordered chronologically by year descending)
-                        for s in artist_data.get("singles", {}).get("results", []):
-                            t = s.get("title")
-                            if t:
-                                key = t.lower()
-                                if key not in seen:
-                                    seen.add(key)
-                                    yr = s.get("year", "Rilis Terbaru")
-                                    thumbs = s.get("thumbnails", [])
-                                    cover = thumbs[-1]["url"] if thumbs else None
-                                    vid = s.get("videoId")
-                                    yt_url = f"https://music.youtube.com/watch?v={vid}" if vid else None
-                                    order = len(songs) + 1
-                                    songs.append(
-                                        Song(
-                                            title=t,
-                                            artist=artists[0].get("artist", display_query.title()),
-                                            yt_music_id=vid,
-                                            yt_music_url=yt_url,
-                                            cover_url=cover,
-                                            found_on_yt_music=bool(vid),
-                                            post_order_idx=order,
-                                            release_tag=f"Rilis {yr}",
-                                        )
-                                    )
-                            if len(songs) >= max_songs:
-                                break
-
-                        # Read newest album tracks if still under max_songs
-                        if len(songs) < max_songs:
-                            for s in artist_data.get("songs", {}).get("results", []):
-                                t = s.get("title")
-                                if t:
-                                    key = t.lower()
-                                    if key not in seen:
-                                        seen.add(key)
-                                        order = len(songs) + 1
-                                        vid = s.get("videoId")
-                                        thumbs = s.get("thumbnails", [])
-                                        cover = thumbs[-1]["url"] if thumbs else None
-                                        songs.append(
-                                            Song(
-                                                title=t,
-                                                artist=artists[0].get("artist", display_query.title()),
-                                                yt_music_id=vid,
-                                                yt_music_url=f"https://music.youtube.com/watch?v={vid}" if vid else None,
-                                                cover_url=cover,
-                                                found_on_yt_music=bool(vid),
-                                                post_order_idx=order,
-                                                release_tag="Lagu Terbaru",
-                                            )
-                                        )
-                                if len(songs) >= max_songs:
-                                    break
-
-                # 2B. Direct song query fallback
-                if len(songs) < max_songs:
-                    results = yt.search(display_query, filter="songs")
-                    for r in results:
-                        title = r.get("title")
-                        art_list = [a["name"] for a in r.get("artists", [])]
-                        art_str = ", ".join(art_list) if art_list else display_query.title()
-                        if title:
-                            key = title.lower()
-                            if key not in seen:
-                                seen.add(key)
-                                order = len(songs) + 1
-                                vid = r.get("videoId")
-                                thumbs = r.get("thumbnails", [])
-                                cover = thumbs[-1]["url"] if thumbs else None
-                                songs.append(
-                                    Song(
-                                        title=title,
-                                        artist=art_str,
-                                        yt_music_id=vid,
-                                        yt_music_url=f"https://music.youtube.com/watch?v={vid}" if vid else None,
-                                        cover_url=cover,
-                                        found_on_yt_music=bool(vid),
-                                        post_order_idx=order,
-                                        release_tag="Terbaru",
-                                    )
-                                )
-                        if len(songs) >= max_songs:
-                            break
-            except Exception as exc:
-                logger.debug(f"YTMusic search error: {exc}")
-
-        # Step 3: If still need songs, supplement with top trending Instagram Reels viral songs
-        if len(songs) < max_songs:
-            viral_ig_songs = DEMO_PROFILES.get("default", [])
-            for item in viral_ig_songs:
-                title, artist = item[0], item[1]
-                count = item[2]
-                tag = item[3] if len(item) > 3 else "Trending Reels"
-                key = title.lower()
-                if key not in seen:
-                    seen.add(key)
-                    order = len(songs) + 1
-                    songs.append(
-                        Song(
-                            title=title,
-                            artist=artist,
-                            occurrence_count=count,
-                            post_order_idx=order,
-                            release_tag=tag,
-                        )
-                    )
-                if len(songs) >= max_songs:
-                    break
-
-        final_songs = songs[:max_songs]
-
-        if progress_callback:
-            progress_callback(len(final_songs), max_songs, f"Ditemukan {len(final_songs)} lagu terbaru untuk @{clean}!")
+            for idx, item in enumerate(selected_items, start=1)
+        ]
 
         return ScrapingResult(
             username=clean,
             profile_pic_url="https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=150&h=150&fit=crop",
-            total_posts_scraped=len(final_songs) * 2 + 2,
-            songs=final_songs,
-            posts_with_music=len(final_songs),
-            posts_without_music=2,
+            total_posts_scraped=sum(s.occurrence_count for s in songs) + 3,
+            songs=songs,
+            posts_with_music=sum(s.occurrence_count for s in songs),
+            posts_without_music=3,
             scraped_at=datetime.now(),
-            is_demo=False,
+            is_demo=True,
         )
 
     def parse_manual_songs(self, text: str) -> list[Song]:
@@ -472,34 +318,48 @@ class InstagramScraper:
                 songs.append(Song(title=line.strip(), artist="", post_order_idx=idx))
         return songs
 
-    def _scrape_instagram_live(
+    def scrape_music(
         self,
         username: str,
         max_songs: int = 10,
         progress_callback: ProgressCallback | None = None,
         max_posts_to_scan: int = 100,
     ) -> ScrapingResult:
-        """Run live Instagram scraping using authenticated session.
+        """Scrape music from the actual Instagram profile and its recent posts.
 
-        Guarantees chronological ordering: scanning starts from the newest post,
-        so Song #1 is strictly from the most recent post, Song #2 from the 2nd most recent, etc.
+        Scans starting from the newest post, strictly maintaining chronological order.
         """
-        preview = self.get_profile_preview(username)
-        clean = self._clean_username(preview.username)
+        self.reset_cancel()
+        clean = self._clean_username(username)
+        if not clean:
+            raise AccountNotFoundError("Username tidak valid.")
+
+        # Check session: if user has no session, alert them so they can load cookies.txt
+        if not self.session_id:
+            raise AccessBlockedError(
+                f"Instagram membatasi akses tanpa login (403 Forbidden pada graphql/query).\n\n"
+                f"Untuk membaca postingan & musik asli dari akun @{clean}, Anda perlu memuat session Instagram.\n"
+                "Silakan muat file 'cookies.txt' (dari ekstensi Get cookies.txt LOCALLY) lewat tombol 'Cookie IG' di atas."
+            )
+
+        if progress_callback:
+            progress_callback(0, max_songs, f"Menghubungkan ke profil Instagram @{clean}...")
 
         try:
             profile = Profile.from_username(self.loader.context, clean)
         except Exception as exc:
-            raise self._map_profile_error(exc, preview.username) from exc
+            raise self._map_profile_error(exc, clean) from exc
+
+        if profile.is_private:
+            raise PrivateAccountError(f"Akun @{clean} bersifat Private dan tidak bisa diakses.")
 
         if progress_callback:
-            progress_callback(0, max_songs, f"Terhubung ke @{clean}. Memeriksa postingan terbaru...")
+            progress_callback(0, max_songs, f"Memeriksa postingan terbaru @{clean} (mencari {max_songs} lagu)...")
 
         try:
-            # profile.get_posts() yields posts in reverse-chronological order (newest first)
             posts = profile.get_posts()
         except Exception as exc:
-            raise self._map_profile_error(exc, preview.username) from exc
+            raise self._map_profile_error(exc, clean) from exc
 
         songs_map: dict[tuple[str, str], Song] = {}
         posts_with_music = 0
@@ -511,12 +371,14 @@ class InstagramScraper:
                 raise ScraperError("Scraping dibatalkan.")
 
             if len(songs_map) >= max_songs:
+                if progress_callback:
+                    progress_callback(len(songs_map), max_songs, f"Target {max_songs} lagu terbaru berhasil ditemukan!")
                 break
             if idx > max_posts_to_scan:
                 break
 
             if progress_callback:
-                progress_callback(len(songs_map), max_songs, f"Post #{idx} (Lagu unik: {len(songs_map)}/{max_songs})...")
+                progress_callback(len(songs_map), max_songs, f"Memeriksa post #{idx} (Lagu unik: {len(songs_map)}/{max_songs})...")
 
             extracted = self.extract_music_from_post(post)
             if extracted:
@@ -541,11 +403,15 @@ class InstagramScraper:
 
             sleep(SCRAPE_DELAY_SECONDS)
 
-        # Strictly maintain order from newest post to older posts (insertion order)
+        # Strictly maintain order from the NEWEST post to older posts (insertion order)
         songs = list(songs_map.values())
+
+        if not songs and posts_without_music > 0:
+            logger.info(f"Scraped {idx} posts for @{clean}, but none contained commercial music assets.")
+
         return ScrapingResult(
-            username=preview.username,
-            profile_pic_url=str(preview.profile_pic_url),
+            username=profile.username,
+            profile_pic_url=str(profile.profile_pic_url),
             total_posts_scraped=idx,
             songs=songs,
             posts_with_music=posts_with_music,
@@ -553,30 +419,3 @@ class InstagramScraper:
             scraped_at=datetime.now(),
             is_demo=False,
         )
-
-    def scrape_music(
-        self,
-        username: str,
-        max_songs: int = 10,
-        progress_callback: ProgressCallback | None = None,
-        max_posts_to_scan: int = 100,
-    ) -> ScrapingResult:
-        """Primary music resolution method.
-
-        Guarantees that songs are returned strictly ordered from the NEWEST post/release first.
-        """
-        self.reset_cancel()
-        clean = self._clean_username(username)
-
-        # Mode 1: If NO cookie session, use seamless zero-cookie resolution directly
-        if not self.session_id:
-            return self.resolve_music_without_login(clean, max_songs=max_songs, progress_callback=progress_callback)
-
-        # Mode 2: If cookie session IS present, try live scraping with auto-fallback
-        try:
-            return self._scrape_instagram_live(
-                clean, max_songs=max_songs, progress_callback=progress_callback, max_posts_to_scan=max_posts_to_scan
-            )
-        except (AccessBlockedError, ScraperError) as exc:
-            logger.warning(f"Live scraping failed ({exc}), falling back to zero-cookie resolution")
-            return self.resolve_music_without_login(clean, max_songs=max_songs, progress_callback=progress_callback)
