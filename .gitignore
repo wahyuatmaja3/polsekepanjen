@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Secrets, Session Cookies, and Environment Variables
+.env
+*.env
+cookies.txt
+instagram_cookies.txt
+ig_cookies.txt
+*.cookie
+.spotify_token.json
+
+# IDE / Editors / AI tools
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+
+# Generated test/export artifacts
+playlist_*.html
+playlist_*.csv
+playlist_*.m3u8
+playlist_*.m3u
+*.log
